@@ -175,10 +175,14 @@ class PreparationView(QWidget):
         self.mic_combo.blockSignals(False)
 
         # Clean up previous thread if any
-        if self._enum_thread and self._enum_thread.isRunning():
-            self._enum_worker.stop()
-            self._enum_thread.quit()
-            self._enum_thread.wait(1000)
+        try:
+            if self._enum_thread is not None and self._enum_thread.isRunning():
+                self._enum_worker.stop()
+                self._enum_thread.quit()
+                self._enum_thread.wait(1000)
+        except RuntimeError:
+            # Thread was already deleted
+            pass
 
         self._enum_thread = QThread()
         self._enum_worker = DeviceEnumerationWorker()
@@ -189,9 +193,14 @@ class PreparationView(QWidget):
         self._enum_worker.cameras_ready.connect(self._on_cameras_ready)
         self._enum_worker.finished.connect(self._enum_thread.quit)
         self._enum_worker.finished.connect(self._enum_worker.deleteLater)
-        self._enum_thread.finished.connect(self._enum_thread.deleteLater)
+        self._enum_thread.finished.connect(self._on_enum_thread_finished)
 
         self._enum_thread.start()
+
+    def _on_enum_thread_finished(self):
+        """Clean up thread reference when finished"""
+        self._enum_thread = None
+        self._enum_worker = None
 
     def _populate_screens(self):
         """Populate screens combo (fast, runs on main thread)"""
@@ -433,6 +442,8 @@ class PreparationView(QWidget):
             self.audio_manager.stop_monitoring()
         self.preview_label.setPixmap(QPixmap())
         self.preview_label.setText("Preview Paused")
+        # Invalidate cache so devices are rescanned on next show
+        self._cache_time = 0
 
     def hideEvent(self, event):
         """Stop camera when view is hidden (e.g. going back to library)"""
@@ -441,10 +452,8 @@ class PreparationView(QWidget):
 
     def showEvent(self, event):
         """Restart camera if needed when view is shown"""
-        self.refresh_devices() # Ensure screens/mics are up to date
-        if self.camera_combo.count() > 0:
-             self.on_camera_changed(self.camera_combo.currentIndex())
-        if self.mic_combo.count() > 0:
-             self.on_mic_changed(self.mic_combo.currentIndex())
+        # refresh_devices will trigger _on_cameras_ready and _on_mics_ready
+        # which will call on_camera_changed and on_mic_changed automatically
+        self.refresh_devices()
         super().showEvent(event)
 
