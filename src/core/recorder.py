@@ -213,11 +213,11 @@ class Recorder:
         except ImportError:
             pass
 
-        # Shift audio 150ms later to compensate for video capture delay
+        # Shift audio 180ms later to compensate for video capture delay
         cmd = [
             ffmpeg_exe,
             "-i", self._temp_file,
-            "-itsoffset", "0.15",  # Delay audio by 150ms
+            "-itsoffset", "0.18",  # Delay audio by 180ms
             "-i", self._temp_file,
             "-map", "0:v",
             "-map", "1:a",
