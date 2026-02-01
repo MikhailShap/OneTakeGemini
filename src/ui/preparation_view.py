@@ -5,6 +5,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Signal, Qt, QTimer, QThread
 from PySide6.QtGui import QPixmap, QImage, QPainter, QPainterPath, QColor
+from src.utils import logger
 
 class PreparationView(QWidget):
     # Signals
@@ -137,20 +138,25 @@ class PreparationView(QWidget):
         # Connect Combo Changes
         self.camera_combo.currentIndexChanged.connect(self.on_camera_changed)
 
-        # Defer device loading to ensure UI shows up first
-        QTimer.singleShot(100, self.refresh_devices)
+        # Flag to track if view has been shown
+        self._initialized = False
+        # DON'T call refresh_devices here - wait for showEvent
+        # This speeds up app startup significantly
 
     def refresh_devices(self):
+        logger.debug("PreparationView.refresh_devices() called")
         current_time = time.time()
 
         # Check if we have valid cached devices
         if (self._cached_cameras is not None and
             self._cached_mics is not None and
             current_time - self._cache_time < self._cache_duration):
+            logger.debug("Using cached device data")
             self._populate_from_cache()
             return
 
         # Start async enumeration
+        logger.debug("Starting async device enumeration")
         self._start_async_enumeration()
 
     def _start_async_enumeration(self):
@@ -218,6 +224,7 @@ class PreparationView(QWidget):
 
     def _on_mics_ready(self, mics):
         """Called when microphones enumeration completes"""
+        logger.debug(f"_on_mics_ready: received {len(mics)} microphones")
         from src.core.config_manager import ConfigManager
         config = ConfigManager()
 
@@ -243,6 +250,7 @@ class PreparationView(QWidget):
 
     def _on_cameras_ready(self, cams):
         """Called when camera enumeration completes"""
+        logger.debug(f"_on_cameras_ready: received {len(cams)} cameras")
         from src.core.config_manager import ConfigManager
         config = ConfigManager()
 
@@ -339,22 +347,28 @@ class PreparationView(QWidget):
 
     def on_camera_changed(self, index):
         camera_index = self.camera_combo.itemData(index)
-        
+        logger.debug(f"on_camera_changed: index={index}, camera_index={camera_index}")
+
         # Save selection
         from src.core.config_manager import ConfigManager
         ConfigManager().set("last_camera_index", camera_index)
-        
-        if self.camera_manager is None:
-            from src.core.camera_manager import CameraManager
-            self.camera_manager = CameraManager()
-            self.camera_manager.frame_ready.connect(self.update_preview)
 
-        if camera_index is not None and camera_index >= 0:
-            self.camera_manager.start_camera(camera_index)
-        else:
-            self.camera_manager.stop_camera()
-            self.preview_label.setPixmap(QPixmap())
-            self.preview_label.setText("Camera Disabled")
+        try:
+            if self.camera_manager is None:
+                from src.core.camera_manager import CameraManager
+                self.camera_manager = CameraManager()
+                self.camera_manager.frame_ready.connect(self.update_preview)
+
+            if camera_index is not None and camera_index >= 0:
+                logger.info(f"Starting camera preview for index {camera_index}")
+                self.camera_manager.start_camera(camera_index)
+            else:
+                logger.debug("Camera disabled, stopping preview")
+                self.camera_manager.stop_camera()
+                self.preview_label.setPixmap(QPixmap())
+                self.preview_label.setText("Camera Disabled")
+        except Exception as e:
+            logger.error(f"Error in on_camera_changed: {e}")
 
     def update_preview(self, q_image):
         if not hasattr(self, 'preview_label'):
@@ -436,24 +450,40 @@ class PreparationView(QWidget):
 
     def stop_preview(self):
         """Stops camera and audio monitoring explicitly."""
-        if self.camera_manager:
-            self.camera_manager.stop_camera()
-        if self.audio_manager:
-            self.audio_manager.stop_monitoring()
-        self.preview_label.setPixmap(QPixmap())
-        self.preview_label.setText("Preview Paused")
+        logger.debug("PreparationView.stop_preview() called")
+        try:
+            if self.camera_manager:
+                self.camera_manager.stop_camera()
+        except RuntimeError:
+            logger.debug("Camera manager already cleaned up")
+        try:
+            if self.audio_manager:
+                self.audio_manager.stop_monitoring()
+        except RuntimeError:
+            logger.debug("Audio manager already cleaned up")
+        try:
+            self.preview_label.setPixmap(QPixmap())
+            self.preview_label.setText("Preview Paused")
+        except RuntimeError:
+            pass
         # Invalidate cache so devices are rescanned on next show
         self._cache_time = 0
 
     def hideEvent(self, event):
         """Stop camera when view is hidden (e.g. going back to library)"""
-        self.stop_preview()
+        # Only stop if we were actually initialized (avoid startup issues)
+        if self._initialized:
+            try:
+                self.stop_preview()
+            except Exception as e:
+                logger.debug(f"Error in hideEvent: {e}")
         super().hideEvent(event)
 
     def showEvent(self, event):
         """Restart camera if needed when view is shown"""
-        # refresh_devices will trigger _on_cameras_ready and _on_mics_ready
-        # which will call on_camera_changed and on_mic_changed automatically
-        self.refresh_devices()
+        logger.debug("PreparationView.showEvent() called")
+        self._initialized = True
         super().showEvent(event)
+        # Use timer to avoid blocking the show animation
+        QTimer.singleShot(50, self.refresh_devices)
 

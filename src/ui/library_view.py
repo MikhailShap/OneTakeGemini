@@ -209,9 +209,8 @@ class LibraryView(QWidget):
         """)
         self.new_recording_btn.clicked.connect(self.start_new_recording_requested.emit)
         layout.addWidget(self.new_recording_btn)
-        
-        # Initial refresh
-        self.refresh_list()
+
+        # НЕ вызываем refresh_list() здесь - он будет вызван в showEvent
 
     def refresh_list(self):
         self.recordings_list.clear()
@@ -291,5 +290,12 @@ class LibraryView(QWidget):
             self.open_file(output_dir)
     
     def showEvent(self, event):
-        self.refresh_list()
         super().showEvent(event)
+        if not hasattr(self, '_first_show_done'):
+            # Первый показ - отложить refresh чтобы окно появилось быстрее
+            self._first_show_done = True
+            from PySide6.QtCore import QTimer
+            QTimer.singleShot(0, self.refresh_list)
+        else:
+            # Повторные показы - обновить сразу
+            self.refresh_list()

@@ -1,37 +1,24 @@
 import os
 from PySide6.QtWidgets import QMainWindow, QStackedWidget
+from PySide6.QtCore import QTimer
 from src.ui.library_view import LibraryView
 from src.ui.preparation_view import PreparationView
+from src.utils import logger
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        logger.debug("MainWindow.__init__ started")
+
         self.setWindowTitle("OneTake")
-        self.setFixedSize(750, 600) # Wider to fit camera preview
-        
+        self.setFixedSize(750, 600)
+
         # Apply Theme
         from src.ui.styles import MAIN_STYLE
         self.setStyleSheet(MAIN_STYLE)
-        
-        # Apply Windows Dark Title Bar
-        try:
-            import ctypes
-            from ctypes import wintypes
-            
-            # Key: DWMWA_USE_IMMERSIVE_DARK_MODE = 20
-            DWMWA_USE_IMMERSIVE_DARK_MODE = 20
-            set_window_attribute = ctypes.windll.dwmapi.DwmSetWindowAttribute
-            get_parent = ctypes.windll.user32.GetParent
-            hwnd = int(self.winId())
-            
-            # Set the attribute
-            rendering_policy = wintypes.BOOL(True)
-            set_window_attribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, ctypes.byref(rendering_policy), ctypes.sizeof(rendering_policy))
-            
-            # Trigger a repaint (sometimes needed)
-            self.repaint()
-        except Exception as e:
-            print(f"Failed to set dark title bar: {e}")
+
+        # Apply Windows Dark Title Bar asynchronously (don't block startup)
+        QTimer.singleShot(0, self._apply_dark_title_bar)
         
         # Central Stacked Widget for navigation
         self.stack = QStackedWidget()
@@ -53,16 +40,45 @@ class MainWindow(QMainWindow):
         self.recorder = None
         self.overlay = None
         self._recording_finalized = False  # Prevent double start race condition
+        self._recording_cancelled = False  # Track if user cancelled before recording started
+
+        logger.debug("MainWindow.__init__ completed")
+
+    def _apply_dark_title_bar(self):
+        """Apply Windows dark title bar asynchronously."""
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+            set_window_attribute = ctypes.windll.dwmapi.DwmSetWindowAttribute
+            hwnd = int(self.winId())
+
+            rendering_policy = wintypes.BOOL(True)
+            set_window_attribute(
+                hwnd,
+                DWMWA_USE_IMMERSIVE_DARK_MODE,
+                ctypes.byref(rendering_policy),
+                ctypes.sizeof(rendering_policy)
+            )
+            self.repaint()
+            logger.debug("Dark title bar applied successfully")
+        except Exception as e:
+            logger.warning(f"Failed to set dark title bar: {e}")
 
     def show_preparation(self):
+        logger.debug("Navigating to PreparationView")
         self.stack.setCurrentIndex(1)
-        
+
     def show_library(self):
+        logger.debug("Navigating to LibraryView")
         self.stack.setCurrentIndex(0)
 
     def start_recording(self):
-        # Reset finalization flag for new recording
+        logger.info("start_recording() called")
+        # Reset flags for new recording
         self._recording_finalized = False
+        self._recording_cancelled = False
 
         # 1. Gather config from PreparationView
         screen_geom = self.preparation_view.screen_combo.currentData()
@@ -123,90 +139,122 @@ class MainWindow(QMainWindow):
         
         self.recorder_overlay.show()
         self.control_panel.show()
-        
-        # Safety timeout: If camera doesn't start in 3 seconds, start recording anyway
-        from PySide6.QtCore import QTimer
-        QTimer.singleShot(3000, self.force_finalize_recording)
+        logger.debug("Overlay and control panel shown, waiting for camera...")
+
+        # Safety timeout: If camera doesn't start in 10 seconds, start recording anyway
+        # Increased from 3s to 10s to prevent premature auto-start
+        QTimer.singleShot(10000, self.force_finalize_recording)
         
     def force_finalize_recording(self):
-        # Only start if we haven't already finalized
-        if not self._recording_finalized:
-            print("Camera start timed out, forcing recording start...")
-            self.finalize_start_recording()
+        """Force start recording after timeout. Only if overlay is still visible and not cancelled."""
+        # Check multiple conditions to prevent false starts
+        if self._recording_finalized:
+            logger.debug("force_finalize_recording: already finalized, skipping")
+            return
+
+        if self._recording_cancelled:
+            logger.debug("force_finalize_recording: recording was cancelled, skipping")
+            return
+
+        # Check if overlay is still visible (user didn't navigate away)
+        if not hasattr(self, 'recorder_overlay') or self.recorder_overlay is None:
+            logger.debug("force_finalize_recording: overlay not present, skipping")
+            return
+
+        if not self.recorder_overlay.isVisible():
+            logger.debug("force_finalize_recording: overlay not visible, skipping")
+            return
+
+        logger.warning("Camera start timed out after 10s, forcing recording start...")
+        self.finalize_start_recording()
 
     def finalize_start_recording(self):
-        # Avoid double start with explicit flag (safer than checking self.recorder)
+        """Start FFmpeg recording. Called when camera is ready or after timeout."""
+        # Avoid double start with explicit flag
         if self._recording_finalized:
+            logger.debug("finalize_start_recording: already finalized, skipping")
             return
+
+        if self._recording_cancelled:
+            logger.debug("finalize_start_recording: was cancelled, skipping")
+            return
+
         self._recording_finalized = True
-        # Called when overlay camera is ready (or immediately if no camera)
+        logger.info("finalize_start_recording: starting FFmpeg recording")
+
         config = getattr(self, 'pending_config', {})
-        
+
         from src.core.recorder import Recorder
         self.recorder = Recorder()
         success, message = self.recorder.start_recording(config)
-        
+
         if not success:
-            print(f"Failed to start: {message}")
+            logger.error(f"Failed to start recording: {message}")
             self.stop_recording_cleanup()
             from PySide6.QtWidgets import QMessageBox
             QMessageBox.critical(self, "Error", f"Failed to start recording:\n{message}")
         else:
-            print("Recording started!")
+            logger.info("Recording started successfully")
 
     def stop_recording(self):
         """Stops recording and returns to Library."""
+        logger.info("stop_recording() called")
         self.stop_recording_cleanup()
-        
+
         output_file = None
         if self.recorder:
-             output_file = self.recorder.stop_recording()
-             self.recorder = None
+            output_file = self.recorder.stop_recording()
+            self.recorder = None
 
         # Show Library
         self.stack.setCurrentIndex(0)
         self.showNormal()
-        
+
         # Refresh Library
         if output_file:
-             self.library_view.refresh_list()
+            logger.info(f"Recording saved: {output_file}")
+            self.library_view.refresh_list()
 
     def cancel_recording(self):
         """Stops recording and deletes the file."""
+        logger.info("cancel_recording() called")
+        self._recording_cancelled = True  # Prevent force_finalize from starting recording
+
         self.stop_recording_cleanup()
         output_file = None
         if self.recorder:
-             output_file = self.recorder.stop_recording()
-             self.recorder = None
-        
+            output_file = self.recorder.stop_recording()
+            self.recorder = None
+
         if output_file and os.path.exists(output_file):
             try:
                 os.remove(output_file)
-                print(f"Recording cancelled, deleted: {output_file}")
+                logger.info(f"Recording cancelled, deleted: {output_file}")
             except Exception as e:
-                print(f"Error deleting cancelled file: {e}")
-        
+                logger.error(f"Error deleting cancelled file: {e}")
+
         # Show Preparation (User likely wants to try again)
-        self.stack.setCurrentIndex(1) # Preparation
+        self.stack.setCurrentIndex(1)
         self.showNormal()
 
     def restart_recording(self):
         """Stops current, deletes it, and starts fresh immediately."""
+        logger.info("restart_recording() called")
         self.stop_recording_cleanup()
         output_file = None
         if self.recorder:
-             output_file = self.recorder.stop_recording()
-             self.recorder = None
-        
+            output_file = self.recorder.stop_recording()
+            self.recorder = None
+
         if output_file and os.path.exists(output_file):
             try:
                 os.remove(output_file)
-            except: pass
-            
+                logger.debug(f"Deleted old recording for restart: {output_file}")
+            except Exception as e:
+                logger.warning(f"Could not delete old recording: {e}")
+
         # Start again with SAME config
-        # We need to re-initiate the start sequence
         # Brief delay to ensure ffmpeg closes
-        from PySide6.QtCore import QTimer
         QTimer.singleShot(500, self.start_recording)
 
     def stop_recording_cleanup(self):

@@ -1,7 +1,9 @@
 import sounddevice as sd
-import cv2
 import subprocess
+# cv2 импортируется лениво в get_camera_devices_fast() и get_camera_devices()
 from PySide6.QtCore import QObject, Signal, QThread
+from src.utils.paths import get_ffmpeg_path
+from src.utils import logger
 
 
 class DeviceEnumerationWorker(QObject):
@@ -16,13 +18,16 @@ class DeviceEnumerationWorker(QObject):
         self._is_running = True
 
     def run(self):
+        logger.debug("DeviceEnumerationWorker.run() started")
+
         # Enumerate microphones (fast, ~10-50ms)
         mics = []
         if self._is_running:
             try:
                 mics = DeviceManager.get_audio_input_devices()
+                logger.debug(f"Found {len(mics)} microphones")
             except Exception as e:
-                print(f"Error enumerating mics: {e}")
+                logger.error(f"Error enumerating mics: {e}")
         self.mics_ready.emit(mics)
 
         # Enumerate cameras (fast mode - trust FFmpeg list without OpenCV verification)
@@ -30,10 +35,12 @@ class DeviceEnumerationWorker(QObject):
         if self._is_running:
             try:
                 cameras = DeviceManager.get_camera_devices_fast()
+                logger.debug(f"Found {len(cameras)} cameras")
             except Exception as e:
-                print(f"Error enumerating cameras: {e}")
+                logger.error(f"Error enumerating cameras: {e}")
         self.cameras_ready.emit(cameras)
 
+        logger.debug("DeviceEnumerationWorker.run() completed")
         self.finished.emit()
 
     def stop(self):
@@ -48,12 +55,8 @@ class DeviceManager:
         """Returns a list of audio input devices names."""
         devices = []
         try:
-            # query_devices returns a list of dicts
+            logger.debug("Querying audio input devices via sounddevice...")
             all_devices = sd.query_devices()
-            # Filter for input devices (max_input_channels > 0)
-            # We want unique names to avoid duplicates if possible, or just list them all
-            # HostAPI 0 is usually MME on Windows, 1 is DirectSound, etc. 
-            # We'll just list all unique input names for simplicity in this MVP
             seen_names = set()
             for d in all_devices:
                 if d['max_input_channels'] > 0:
@@ -61,9 +64,9 @@ class DeviceManager:
                     if name not in seen_names:
                         devices.append(name)
                         seen_names.add(name)
+            logger.debug(f"Audio devices found: {devices}")
         except Exception as e:
-            print(f"Error querying audio devices: {e}")
-            # Fallback
+            logger.error(f"Error querying audio devices: {e}")
             devices = ["Default Microphone"]
         return devices
 
@@ -75,12 +78,20 @@ class DeviceManager:
         """
         devices = {}
         try:
-            import imageio_ffmpeg
-            ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+            ffmpeg_exe = get_ffmpeg_path()
+            logger.debug(f"Getting FFmpeg audio devices using: {ffmpeg_exe}")
 
-            # Run ffmpeg to list devices
+            # Run ffmpeg to list devices with timeout
             cmd = [ffmpeg_exe, "-list_devices", "true", "-f", "dshow", "-i", "dummy"]
-            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='ignore')
+            result = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding='utf-8',
+                errors='ignore',
+                timeout=10  # 10 second timeout
+            )
 
             output = result.stderr
 
@@ -111,8 +122,11 @@ class DeviceManager:
                         name = line[start:end]
                         last_name = name
 
+            logger.debug(f"FFmpeg audio devices: {devices}")
+        except subprocess.TimeoutExpired:
+            logger.warning("FFmpeg device listing timed out after 10s")
         except Exception as e:
-            print(f"Error listing FFmpeg devices: {e}")
+            logger.error(f"Error listing FFmpeg devices: {e}")
 
         return devices
 
@@ -123,14 +137,19 @@ class DeviceManager:
         """
         device_names = []
         try:
-            import imageio_ffmpeg
-            ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+            ffmpeg_exe = get_ffmpeg_path()
+            logger.debug(f"Getting FFmpeg video devices using: {ffmpeg_exe}")
 
             # Use dummy file to trigger device listing
             cmd = [ffmpeg_exe, "-list_devices", "true", "-f", "dshow", "-i", "dummy"]
 
-            # Capture output. FFmpeg writes to stderr.
-            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            # Capture output with timeout. FFmpeg writes to stderr.
+            result = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=10  # 10 second timeout
+            )
 
             output = ""
             try:
@@ -162,8 +181,11 @@ class DeviceManager:
                         if name:
                             device_names.append(name)
 
+            logger.debug(f"FFmpeg video devices: {device_names}")
+        except subprocess.TimeoutExpired:
+            logger.warning("FFmpeg video device listing timed out after 10s")
         except Exception as e:
-            print(f"Error listing FFmpeg video devices: {e}")
+            logger.error(f"Error listing FFmpeg video devices: {e}")
 
         return device_names
 
@@ -174,25 +196,29 @@ class DeviceManager:
         Much faster than OpenCV verification (100ms vs 3-5s).
         Falls back to OpenCV scan if FFmpeg finds nothing.
         """
+        logger.debug("get_camera_devices_fast() started")
         available_cameras = []
         friendly_names = DeviceManager.get_ffmpeg_video_devices()
-        print(f"FFmpeg found camera names (fast mode): {friendly_names}")
+        logger.info(f"FFmpeg found camera names (fast mode): {friendly_names}")
 
         if friendly_names:
             for i, name in enumerate(friendly_names):
                 available_cameras.append({'index': i, 'name': name})
         else:
             # Fallback: FFmpeg didn't find cameras, try quick OpenCV scan
-            print("FFmpeg found no cameras, trying OpenCV fallback...")
+            logger.warning("FFmpeg found no cameras, trying OpenCV fallback...")
+            import cv2  # Ленивый импорт - только если FFmpeg не нашёл камеры
             for i in range(3):  # Check first 3 indices quickly
                 try:
                     cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
                     if cap.isOpened():
                         available_cameras.append({'index': i, 'name': f"Camera {i}"})
                         cap.release()
-                except Exception:
-                    pass
+                        logger.debug(f"OpenCV found camera at index {i}")
+                except Exception as e:
+                    logger.debug(f"OpenCV camera check failed for index {i}: {e}")
 
+        logger.debug(f"get_camera_devices_fast() returning {len(available_cameras)} cameras")
         return available_cameras
 
     @staticmethod
@@ -201,6 +227,8 @@ class DeviceManager:
         Returns a list of available camera indices and friendly names.
         Uses OpenCV verification (slower but more accurate).
         """
+        import cv2  # Ленивый импорт
+
         available_cameras = []
 
         # 1. Get friendly names from FFmpeg (DirectShow order usually matches OpenCV DSHOW order)

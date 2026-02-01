@@ -2,6 +2,7 @@ import time
 from PySide6.QtWidgets import QWidget, QLabel, QVBoxLayout, QHBoxLayout, QPushButton, QSizePolicy
 from PySide6.QtCore import Qt, QPoint, Signal, QRect
 from PySide6.QtGui import QPixmap, QRegion, QPainter, QPainterPath, QColor
+from src.utils import logger
 
 class RecorderOverlay(QWidget):
     """
@@ -14,6 +15,7 @@ class RecorderOverlay(QWidget):
 
     def __init__(self, camera_index=-1, shape="Rectangle", initial_frame=None):
         super().__init__()
+        logger.info(f"RecorderOverlay.__init__(camera_index={camera_index}, shape={shape})")
         self.camera_index = camera_index
         self.shape = shape
         self.camera_manager = None
@@ -69,9 +71,11 @@ class RecorderOverlay(QWidget):
 
         # Start Camera
         if self.camera_index >= 0:
+            logger.debug(f"Starting camera {self.camera_index} for overlay")
             self.start_camera()
         else:
             # If no camera, ready immediately
+            logger.debug("No camera selected, emitting camera_ready immediately")
             from PySide6.QtCore import QTimer
             QTimer.singleShot(100, self.camera_ready.emit)
 
@@ -98,6 +102,7 @@ class RecorderOverlay(QWidget):
     def update_image(self, q_image):
         if not self.first_frame_received:
             self.first_frame_received = True
+            logger.info("RecorderOverlay: first frame received, emitting camera_ready")
             self.camera_ready.emit()
 
         # Frame throttling - skip if too recent
@@ -210,6 +215,7 @@ class RecorderOverlay(QWidget):
         self.old_pos = None
 
     def closeEvent(self, event):
+        logger.debug("RecorderOverlay.closeEvent() called")
         if self.camera_manager:
             self.camera_manager.stop_camera()
         super().closeEvent(event)

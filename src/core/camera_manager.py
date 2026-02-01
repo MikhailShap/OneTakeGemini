@@ -1,8 +1,9 @@
-import cv2
 import threading
-from PySide6.QtCore import QThread, Signal, QObject, Qt
+from PySide6.QtCore import QThread, Signal, QObject
 from PySide6.QtGui import QImage
-import numpy as np
+from src.utils import logger
+
+# cv2 imported lazily in CameraWorker.run() to speed up app startup
 
 
 class CameraWorker(QObject):
@@ -14,105 +15,156 @@ class CameraWorker(QObject):
         self.camera_index = camera_index
         self.width = width
         self.height = height
-        self.is_running = True
-        # Frame throttling: skip new frames if previous not consumed
+        self._is_running = True
         self._frame_pending = False
-        self._frame_lock = threading.Lock()
+        self._lock = threading.Lock()
 
     def run(self):
-        # Use CAP_DSHOW for consistency with DeviceManager and better Windows support
-        cap = cv2.VideoCapture(self.camera_index, cv2.CAP_DSHOW)
-        if not cap.isOpened():
-            print(f"Could not open camera {self.camera_index} with DSHOW, trying CAP_ANY...")
-            cap = cv2.VideoCapture(self.camera_index, cv2.CAP_ANY)
+        # Lazy import cv2 to speed up app startup (~500-800ms saved)
+        import cv2
 
-        if not cap.isOpened():
-            print(f"Could not open camera {self.camera_index}")
-            self.finished.emit()
-            return
+        logger.debug(f"CameraWorker.run() starting for camera {self.camera_index}")
+        cap = None
 
-        while self.is_running:
-            ret, frame = cap.read()
-            if ret:
-                # Skip frame if previous frame not yet consumed (prevents queue buildup)
-                with self._frame_lock:
+        try:
+            # Try DSHOW first
+            if self._is_running:
+                cap = cv2.VideoCapture(self.camera_index, cv2.CAP_DSHOW)
+
+            if cap and not cap.isOpened() and self._is_running:
+                logger.warning(f"DSHOW failed for camera {self.camera_index}, trying MSMF...")
+                cap.release()
+                cap = cv2.VideoCapture(self.camera_index, cv2.CAP_MSMF)
+
+            if not cap or not cap.isOpened():
+                logger.error(f"Could not open camera {self.camera_index}")
+                self.finished.emit()
+                return
+
+            if not self._is_running:
+                cap.release()
+                self.finished.emit()
+                return
+
+            logger.info(f"Camera {self.camera_index} opened")
+
+            # Configure camera
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            cap.set(cv2.CAP_PROP_FPS, 30)
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
+            while self._is_running:
+                ret, frame = cap.read()
+                if not ret:
+                    if not self._is_running:
+                        break
+                    QThread.msleep(50)
+                    continue
+
+                with self._lock:
                     if self._frame_pending:
                         QThread.msleep(10)
                         continue
 
-                # Resize in thread if requested (Performance Optimization)
                 if self.width and self.height:
                     try:
                         frame = cv2.resize(frame, (self.width, self.height), interpolation=cv2.INTER_LINEAR)
-                    except Exception:
-                        pass  # Ignore resize errors
+                    except:
+                        pass
 
-                # Convert BGR to RGB
-                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                h, w, ch = rgb_frame.shape
-                bytes_per_line = ch * w
-                qt_image = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format_RGB888)
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                h, w, ch = rgb.shape
+                img = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888).copy()
 
-                with self._frame_lock:
+                with self._lock:
                     self._frame_pending = True
 
-                # Must copy, otherwise data is bound to local variable 'rgb_frame' which is garbage collected
-                self.frame_captured.emit(qt_image.copy())
-            else:
-                break
+                if self._is_running:
+                    self.frame_captured.emit(img)
 
-            # Simple Frame Limiter (approx 30 FPS)
-            QThread.msleep(33)
+                QThread.msleep(33)
 
-        cap.release()
-        self.finished.emit()
+        except Exception as e:
+            logger.error(f"CameraWorker error: {e}")
+        finally:
+            if cap:
+                cap.release()
+            logger.debug(f"CameraWorker.run() finished for camera {self.camera_index}")
+            self.finished.emit()
 
-    def mark_frame_consumed(self):
-        """Called by UI after processing frame to allow next frame"""
-        with self._frame_lock:
+    def mark_consumed(self):
+        with self._lock:
             self._frame_pending = False
 
     def stop(self):
-        self.is_running = False
+        logger.debug(f"CameraWorker.stop() called")
+        self._is_running = False
+
 
 class CameraManager(QObject):
     frame_ready = Signal(QImage)
 
     def __init__(self):
         super().__init__()
-        self.thread = None
-        self.worker = None
+        self._thread = None
+        self._worker = None
+        self._lock = threading.Lock()
 
     def start_camera(self, index, width=None, height=None):
-        self.stop_camera()  # Stop existing if any
+        logger.info(f"CameraManager.start_camera({index})")
 
-        self.thread = QThread()
-        self.worker = CameraWorker(index, width, height)
-        self.worker.moveToThread(self.thread)
+        with self._lock:
+            self._cleanup()
 
-        self.thread.started.connect(self.worker.run)
-        self.worker.frame_captured.connect(self._on_frame_captured)
-        self.worker.finished.connect(self.thread.quit)
-        self.worker.finished.connect(self.worker.deleteLater)
-        self.thread.finished.connect(self.thread.deleteLater)
+            self._thread = QThread()
+            self._worker = CameraWorker(index, width, height)
+            self._worker.moveToThread(self._thread)
 
-        self.thread.start()
+            self._thread.started.connect(self._worker.run)
+            self._worker.frame_captured.connect(self._on_frame)
+            self._worker.finished.connect(self._on_finished)
 
-    def _on_frame_captured(self, q_image):
-        """Internal handler that forwards frame and marks as consumed"""
-        self.frame_ready.emit(q_image)
-        # Mark frame as consumed so worker can capture next frame
-        if self.worker:
-            self.worker.mark_frame_consumed()
+            self._thread.start()
+            logger.debug("Camera thread started")
+
+    def _on_frame(self, img):
+        self.frame_ready.emit(img)
+        with self._lock:
+            if self._worker:
+                self._worker.mark_consumed()
+
+    def _on_finished(self):
+        logger.debug("CameraManager._on_finished()")
+        # Don't cleanup here - it causes issues with signals during deletion
 
     def stop_camera(self):
-        if self.worker:
-            self.worker.stop()
-        if self.thread:
-            self.thread.quit()
-            if not self.thread.wait(3000):  # 3 second timeout
-                print("Camera thread did not stop in time, terminating...")
-                self.thread.terminate()
-                self.thread.wait()
-        self.worker = None
-        self.thread = None
+        logger.debug("CameraManager.stop_camera()")
+        with self._lock:
+            self._cleanup()
+
+    def _cleanup(self):
+        """Internal cleanup - must be called with lock held"""
+        if self._worker:
+            try:
+                self._worker.stop()
+            except:
+                pass
+
+        if self._thread:
+            try:
+                if self._thread.isRunning():
+                    self._thread.quit()
+                    if not self._thread.wait(2000):
+                        logger.warning("Thread timeout, terminating")
+                        self._thread.terminate()
+                        self._thread.wait(500)
+            except RuntimeError:
+                # Thread already deleted
+                pass
+            except:
+                pass
+
+        self._worker = None
+        self._thread = None
+        logger.debug("Camera cleanup done")
