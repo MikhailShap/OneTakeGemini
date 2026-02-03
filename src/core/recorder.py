@@ -102,11 +102,15 @@ class Recorder:
         cmd.extend(["-vf", "scale=1920:1080"])
 
         # Better quality encoding with constant frame rate
+        # -g 30: keyframe every 1 second (at 30fps) - prevents data loss on stop
+        # -flush_packets 1: flush data to disk immediately - prevents buffer loss
         cmd.extend([
             "-c:v", "libx264",
             "-preset", "veryfast",   # Better quality than ultrafast
             "-crf", "20",            # Better quality (lower = better)
             "-pix_fmt", "yuv420p",
+            "-g", "30",              # Keyframe every 30 frames (1 sec) - critical for data safety
+            "-flush_packets", "1",   # Flush to disk immediately
             "-r", "30",              # Fixed output FPS
             "-vsync", "cfr",         # Constant frame rate for smooth playback
         ])

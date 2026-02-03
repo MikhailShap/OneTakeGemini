@@ -8,7 +8,26 @@
       "Bash(where:*)",
       "Bash(C:OneTakeGeminivenvScriptspython.exe -c \"import imageio_ffmpeg; print\\(imageio_ffmpeg.get_ffmpeg_exe\\(\\)\\)\")",
       "Bash(pip show:*)",
-      "Bash(pip install:*)"
+      "Bash(pip install:*)",
+      "Bash(dir \"C:\\\\OneTakeGemini\" /b)",
+      "Bash(C:OneTakeGeminivenvScriptspython.exe -c \"from PIL import Image; print\\(''Pillow installed''\\)\")",
+      "Bash(./venv/Scripts/python.exe:*)",
+      "Bash(./venv/Scripts/pip.exe install:*)",
+      "Bash(./venv/Scripts/pyinstaller.exe:*)",
+      "Bash(powershell -Command:*)",
+      "Bash(.\\\\venv\\\\Scripts\\\\pyinstaller.exe:*)",
+      "Bash(cmd.exe /c \".\\\\venv\\\\Scripts\\\\pyinstaller.exe --clean OneTake.spec\")",
+      "Bash(cmd.exe /c \"venv\\\\Scripts\\\\pyinstaller.exe --clean OneTake.spec\")",
+      "Bash(cmd.exe:*)",
+      "Bash(dir:*)",
+      "Bash(.\\\\venv\\\\Scripts\\\\python.exe:*)",
+      "Bash(taskkill:*)",
+      "Bash(pyinstaller:*)",
+      "Bash(git add:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nOptimize startup speed and fix video recording\n\n- Lazy load cv2 in camera_manager.py and device_manager.py\n- Defer LibraryView.refresh_list\\(\\) to showEvent\n- Lazy logger initialization\n- Fix video stuttering: framerate=30, preset=veryfast, crf=20, vsync=cfr\n- Audio sync delay adjusted to 250ms\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(Get-ChildItem \"C:\\\\OneTakeGemini\\\\output\\\\*.mp4\")",
+      "Bash(ForEach-Object { Write-Host $_Name)",
+      "Bash(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 $_FullName })"
     ]
   }
 }
